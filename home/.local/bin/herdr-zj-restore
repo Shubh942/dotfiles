@@ -1,0 +1,53 @@
+#!/bin/sh
+# Brings back a zellij session, with every Claude it had, after a reboot.
+# herdr runs this in the restored pane (set by ~/.claude/hooks/herdr-zellij-subagents.sh).
+# Usage: herdr-zj-restore <zellij-session>
+
+name="${1:?usage: herdr-zj-restore <zellij-session>}"
+saved="${XDG_STATE_HOME:-$HOME/.local/state}/herdr-zj/$name"
+
+# Still running (herdr restarted, laptop did not): just reattach.
+if zellij list-sessions -n 2>/dev/null | grep -v EXITED | grep -q "^$name "; then
+  exec zellij attach "$name"
+fi
+
+[ -n "$(ls "$saved"/*.json 2>/dev/null)" ] || exec zellij attach -c "$name"
+
+# Restored Claudes re-register under new pane ids, so start the list fresh.
+rm -rf "$saved.prev"
+mv "$saved" "$saved.prev"
+layout="$saved.prev/layout.kdl"
+
+kdl() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+
+{
+  echo 'layout {'
+  echo '  default_tab_template {'
+  echo '    pane size=1 borderless=true { plugin location="zellij:tab-bar"; }'
+  echo '    children'
+  echo '    pane size=2 borderless=true { plugin location="zellij:status-bar"; }'
+  echo '  }'
+  for f in "$saved.prev"/*.json; do
+    id="$(jq -r '.session_id // empty' "$f")"
+    cwd="$(jq -r '.cwd // empty' "$f")"
+    [ -n "$id" ] && [ -d "$cwd" ] || continue
+    title="$(jq -r '.title // empty' "$f")"
+    # Original flags, minus any old resume/continue, plus this conversation.
+    cmd="$(jq -r '
+      [.argv[1:] | foreach .[] as $a ({skip:false};
+          if .skip and ($a|startswith("-")|not) then {skip:false, out:null}
+          elif ($a == "--resume" or $a == "-r") then {skip:true, out:null}
+          elif ($a == "--continue" or $a == "-c" or ($a|startswith("--resume="))) then {skip:false, out:null}
+          else {skip:false, out:$a} end; .out) | select(. != null and . != "")]
+      | map(@sh) | join(" ")' "$f")"
+    run="claude $cmd --resume $id"
+    echo "  tab name=\"$(kdl "${title:-claude}")\" cwd=\"$(kdl "$cwd")\" {"
+    echo "    pane command=\"fish\" { args \"-C\" \"$(kdl "$run")\"; }"
+    echo '  }'
+  done
+  echo '}'
+} > "$layout"
+
+grep -q '^  tab ' "$layout" || exec zellij attach -c "$name"
+zellij delete-session --force "$name" >/dev/null 2>&1
+exec zellij --session "$name" --new-session-with-layout "$layout"

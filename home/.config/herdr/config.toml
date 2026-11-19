@@ -1,0 +1,5 @@
+onboarding = false
+
+[update]
+# Patched build (~/src/herdr, branch zellij-slots): don't offer updates that would replace it.
+version_check = false

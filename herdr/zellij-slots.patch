@@ -1,0 +1,1296 @@
+From f26a35214eb431fb6206e200dfd14649999b19a9 Mon Sep 17 00:00:00 2001
+From: Shubh Mehta <shubhmehta942@gmail.com>
+Date: Thu, 19 Nov 2026 13:46:58 +0530
+Subject: [PATCH] zellij slots: sub-agents, working spinner, zellij focus sync,
+ restore after reboot
+
+---
+ docs/next/api/herdr-api.schema.json | 134 ++++++++++++++++
+ src/api/mod.rs                      |   2 +
+ src/api/schema.rs                   |   4 +
+ src/api/schema/agents.rs            |   4 +
+ src/api/schema/panes.rs             |  38 +++++
+ src/api/server.rs                   |   2 +
+ src/app/agents.rs                   |  65 +++++++-
+ src/app/api.rs                      |   7 +
+ src/app/api/panes.rs                |   6 +-
+ src/app/api/sub_agents.rs           | 230 ++++++++++++++++++++++++++++
+ src/app/creation.rs                 |   3 +-
+ src/cli/pane.rs                     | 144 ++++++++++++++++-
+ src/cli/spec.rs                     |  30 ++++
+ src/client/mod.rs                   |   3 +-
+ src/client/shell.rs                 |  19 +++
+ src/logging.rs                      |   2 +
+ src/server/client_shell.rs          |  13 +-
+ src/terminal/mod.rs                 |   5 +-
+ src/terminal/state.rs               |  11 ++
+ src/terminal/sub_agents.rs          | 219 ++++++++++++++++++++++++++
+ src/workspace/aggregate.rs          |   3 +-
+ 21 files changed, 927 insertions(+), 17 deletions(-)
+ create mode 100644 src/app/api/sub_agents.rs
+ create mode 100644 src/terminal/sub_agents.rs
+
+diff --git a/docs/next/api/herdr-api.schema.json b/docs/next/api/herdr-api.schema.json
+index e2553f75..70765ca6 100644
+--- a/docs/next/api/herdr-api.schema.json
++++ b/docs/next/api/herdr-api.schema.json
+@@ -2866,6 +2866,29 @@
+           ],
+           "type": "object"
+         },
++        "PaneReleaseSubAgentParams": {
++          "properties": {
++            "pane_id": {
++              "type": "string"
++            },
++            "seq": {
++              "format": "uint64",
++              "minimum": 0,
++              "type": [
++                "integer",
++                "null"
++              ]
++            },
++            "slot": {
++              "type": "string"
++            }
++          },
++          "required": [
++            "pane_id",
++            "slot"
++          ],
++          "type": "object"
++        },
+         "PaneRenameParams": {
+           "properties": {
+             "label": {
+@@ -3084,6 +3107,78 @@
+           ],
+           "type": "object"
+         },
++        "PaneReportSubAgentParams": {
++          "description": "Reports one of several agents that live inside a single pane, such as agents\nrunning in the panes of a terminal multiplexer nested in a Herdr pane. Each\nslot is listed as its own agent.",
++          "properties": {
++            "agent": {
++              "type": "string"
++            },
++            "display_agent": {
++              "type": [
++                "string",
++                "null"
++              ]
++            },
++            "focus_argv": {
++              "description": "Command run (without a shell) when the slot is focused, for example to\nswitch the nested multiplexer to that agent.",
++              "items": {
++                "type": "string"
++              },
++              "type": [
++                "array",
++                "null"
++              ]
++            },
++            "focused": {
++              "description": "Marks the slot focused without running its focus command, for when the\nnested multiplexer itself switched to that agent.",
++              "type": "boolean"
++            },
++            "pane_id": {
++              "type": "string"
++            },
++            "pane_resume_argv": {
++              "description": "Command the restored pane runs after a Herdr restart, for example to\nrebuild the nested multiplexer with its agents resumed.",
++              "items": {
++                "type": "string"
++              },
++              "type": [
++                "array",
++                "null"
++              ]
++            },
++            "seq": {
++              "format": "uint64",
++              "minimum": 0,
++              "type": [
++                "integer",
++                "null"
++              ]
++            },
++            "slot": {
++              "type": "string"
++            },
++            "source": {
++              "type": "string"
++            },
++            "state": {
++              "$ref": "#/schemas/request/$defs/PaneAgentState"
++            },
++            "title": {
++              "type": [
++                "string",
++                "null"
++              ]
++            }
++          },
++          "required": [
++            "pane_id",
++            "slot",
++            "source",
++            "agent",
++            "state"
++          ],
++          "type": "object"
++        },
+         "PaneResizeParams": {
+           "properties": {
+             "amount": {
+@@ -6009,6 +6104,38 @@
+           ],
+           "type": "object"
+         },
++        {
++          "properties": {
++            "method": {
++              "const": "pane.report_sub_agent",
++              "type": "string"
++            },
++            "params": {
++              "$ref": "#/schemas/request/$defs/PaneReportSubAgentParams"
++            }
++          },
++          "required": [
++            "method",
++            "params"
++          ],
++          "type": "object"
++        },
++        {
++          "properties": {
++            "method": {
++              "const": "pane.release_sub_agent",
++              "type": "string"
++            },
++            "params": {
++              "$ref": "#/schemas/request/$defs/PaneReleaseSubAgentParams"
++            }
++          },
++          "required": [
++            "method",
++            "params"
++          ],
++          "type": "object"
++        },
+         {
+           "properties": {
+             "method": {
+@@ -6614,6 +6741,13 @@
+             "screen_detection_skipped": {
+               "type": "boolean"
+             },
++            "slot": {
++              "description": "Set for one of several agents reported inside the same pane\n(`pane.report_sub_agent`). Focus it with the target `<pane_id>#<slot>`.",
++              "type": [
++                "string",
++                "null"
++              ]
++            },
+             "state_change_seq": {
+               "default": 0,
+               "format": "uint64",
+diff --git a/src/api/mod.rs b/src/api/mod.rs
+index 86f90da8..8c6fa67c 100644
+--- a/src/api/mod.rs
++++ b/src/api/mod.rs
+@@ -69,6 +69,8 @@ pub(crate) fn request_changes_ui(request: &Request) -> bool {
+             | Method::PaneReportMetadata(_)
+             | Method::PaneClearAgentAuthority(_)
+             | Method::PaneReleaseAgent(_)
++            | Method::PaneReportSubAgent(_)
++            | Method::PaneReleaseSubAgent(_)
+             | Method::PaneClose(_)
+             | Method::PopupClose(_)
+             | Method::PluginUnlink(_)
+diff --git a/src/api/schema.rs b/src/api/schema.rs
+index 439ed331..6049addf 100644
+--- a/src/api/schema.rs
++++ b/src/api/schema.rs
+@@ -211,6 +211,10 @@ pub enum Method {
+     PaneClearAgentAuthority(PaneClearAgentAuthorityParams),
+     #[serde(rename = "pane.release_agent")]
+     PaneReleaseAgent(PaneReleaseAgentParams),
++    #[serde(rename = "pane.report_sub_agent")]
++    PaneReportSubAgent(PaneReportSubAgentParams),
++    #[serde(rename = "pane.release_sub_agent")]
++    PaneReleaseSubAgent(PaneReleaseSubAgentParams),
+     #[serde(rename = "pane.close")]
+     PaneClose(PaneTarget),
+     #[serde(rename = "popup.close")]
+diff --git a/src/api/schema/agents.rs b/src/api/schema/agents.rs
+index 48450c30..47896814 100644
+--- a/src/api/schema/agents.rs
++++ b/src/api/schema/agents.rs
+@@ -226,6 +226,10 @@ pub struct AgentInfo {
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub foreground_cwd: Option<String>,
+     pub revision: u64,
++    /// Set for one of several agents reported inside the same pane
++    /// (`pane.report_sub_agent`). Focus it with the target `<pane_id>#<slot>`.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub slot: Option<String>,
+ }
+ 
+ #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+diff --git a/src/api/schema/panes.rs b/src/api/schema/panes.rs
+index 9dbe0221..93292863 100644
+--- a/src/api/schema/panes.rs
++++ b/src/api/schema/panes.rs
+@@ -445,6 +445,44 @@ pub struct PaneReleaseAgentParams {
+     pub seq: Option<u64>,
+ }
+ 
++/// Reports one of several agents that live inside a single pane, such as agents
++/// running in the panes of a terminal multiplexer nested in a Herdr pane. Each
++/// slot is listed as its own agent.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
++pub struct PaneReportSubAgentParams {
++    pub pane_id: String,
++    pub slot: String,
++    pub source: String,
++    pub agent: String,
++    pub state: PaneAgentState,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub title: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub display_agent: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub seq: Option<u64>,
++    /// Command run (without a shell) when the slot is focused, for example to
++    /// switch the nested multiplexer to that agent.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub focus_argv: Option<Vec<String>>,
++    /// Marks the slot focused without running its focus command, for when the
++    /// nested multiplexer itself switched to that agent.
++    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
++    pub focused: bool,
++    /// Command the restored pane runs after a Herdr restart, for example to
++    /// rebuild the nested multiplexer with its agents resumed.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub pane_resume_argv: Option<Vec<String>>,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
++pub struct PaneReleaseSubAgentParams {
++    pub pane_id: String,
++    pub slot: String,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub seq: Option<u64>,
++}
++
+ #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+ pub struct PaneInfo {
+     pub pane_id: String,
+diff --git a/src/api/server.rs b/src/api/server.rs
+index 0a4cfa66..6818315c 100644
+--- a/src/api/server.rs
++++ b/src/api/server.rs
+@@ -686,6 +686,8 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
+         Method::PaneReportMetadata(_) => "pane.report_metadata",
+         Method::PaneClearAgentAuthority(_) => "pane.clear_agent_authority",
+         Method::PaneReleaseAgent(_) => "pane.release_agent",
++        Method::PaneReportSubAgent(_) => "pane.report_sub_agent",
++        Method::PaneReleaseSubAgent(_) => "pane.release_sub_agent",
+         Method::PaneClose(_) => "pane.close",
+         Method::PopupClose(_) => "popup.close",
+         Method::EventsSubscribe(_) => "events.subscribe",
+diff --git a/src/app/agents.rs b/src/app/agents.rs
+index 89625f00..888eb37e 100644
+--- a/src/app/agents.rs
++++ b/src/app/agents.rs
+@@ -27,15 +27,71 @@ impl App {
+             .enumerate()
+             .flat_map(|(ws_idx, ws)| {
+                 ws.tabs.iter().flat_map(move |tab| {
+-                    tab.layout
+-                        .pane_ids()
+-                        .into_iter()
+-                        .filter_map(move |pane_id| self.agent_info(ws_idx, pane_id))
++                    tab.layout.pane_ids().into_iter().flat_map(move |pane_id| {
++                        self.agent_info(ws_idx, pane_id)
++                            .into_iter()
++                            .chain(self.sub_agent_infos(ws_idx, pane_id))
++                    })
+                 })
+             })
+             .collect()
+     }
+ 
++    pub(super) fn sub_agent_infos(
++        &self,
++        ws_idx: usize,
++        pane_id: crate::layout::PaneId,
++    ) -> Vec<crate::api::schema::AgentInfo> {
++        let Some(pane_state) = self
++            .state
++            .workspaces
++            .get(ws_idx)
++            .and_then(|ws| ws.pane_state(pane_id))
++        else {
++            return Vec::new();
++        };
++        let Some(terminal) = self.state.terminals.get(&pane_state.attached_terminal_id) else {
++            return Vec::new();
++        };
++        if terminal.sub_agents().is_empty() {
++            return Vec::new();
++        }
++        let Some(pane) = self.pane_metadata(ws_idx, pane_id) else {
++            return Vec::new();
++        };
++        let focused_slot = terminal.focused_sub_agent();
++        terminal
++            .sub_agents()
++            .iter()
++            .map(|(slot, agent)| crate::api::schema::AgentInfo {
++                terminal_id: pane.terminal_id.clone(),
++                name: None,
++                agent: Some(agent.agent_label.clone()),
++                title: agent.title.clone(),
++                terminal_title: pane.terminal_title.clone(),
++                terminal_title_stripped: pane.terminal_title_stripped.clone(),
++                display_agent: agent.display_agent.clone(),
++                agent_status: super::api_helpers::pane_agent_status(agent.state, agent.seen),
++                screen_detection_skipped: true,
++                state_labels: Default::default(),
++                tokens: Default::default(),
++                agent_session: None,
++                workspace_id: pane.workspace_id.clone(),
++                tab_id: pane.tab_id.clone(),
++                pane_id: pane.pane_id.clone(),
++                focused: pane.focused && focused_slot == Some(slot.as_str()),
++                launch_pending: false,
++                interactive_ready: false,
++                state_change_seq: agent.state_change_seq,
++                completion_seq: None,
++                cwd: pane.cwd.clone(),
++                foreground_cwd: pane.foreground_cwd.clone(),
++                revision: pane.revision,
++                slot: Some(slot.clone()),
++            })
++            .collect()
++    }
++
+     pub(super) fn reconcile_managed_agent_target(&mut self, target: &str) {
+         let Ok(resolved) = self.resolve_agent_target(target) else {
+             return;
+@@ -403,6 +459,7 @@ impl App {
+             cwd: pane.cwd,
+             foreground_cwd: pane.foreground_cwd,
+             revision: pane.revision,
++            slot: None,
+         })
+     }
+ 
+diff --git a/src/app/api.rs b/src/app/api.rs
+index dd87c508..0d11236f 100644
+--- a/src/app/api.rs
++++ b/src/app/api.rs
+@@ -9,6 +9,7 @@ mod panes;
+ pub(crate) mod plugins;
+ pub(super) mod responses;
+ mod session;
++mod sub_agents;
+ mod tabs;
+ mod workspaces;
+ mod worktrees;
+@@ -1201,6 +1202,12 @@ impl App {
+             Method::PaneReleaseAgent(params) => {
+                 return self.handle_pane_release_agent(request.id, params);
+             }
++            Method::PaneReportSubAgent(params) => {
++                return self.handle_pane_report_sub_agent(request.id, params);
++            }
++            Method::PaneReleaseSubAgent(params) => {
++                return self.handle_pane_release_sub_agent(request.id, params);
++            }
+             Method::PaneSendText(params) => return self.handle_pane_send_text(request.id, params),
+             Method::PaneSendInput(params) => {
+                 return self.handle_pane_send_input(request.id, params);
+diff --git a/src/app/api/panes.rs b/src/app/api/panes.rs
+index b5f3baf6..93e853ba 100644
+--- a/src/app/api/panes.rs
++++ b/src/app/api/panes.rs
+@@ -489,6 +489,10 @@ impl App {
+     }
+ 
+     pub(super) fn handle_pane_focus(&mut self, id: String, target: PaneTarget) -> String {
++        if let Some((pane_id, slot)) = crate::terminal::split_sub_agent_target_id(&target.pane_id) {
++            let (pane_id, slot) = (pane_id.to_string(), slot.to_string());
++            return self.handle_sub_agent_focus(id, &pane_id, &slot);
++        }
+         let Some((ws_idx, pane_id)) = self.parse_pane_id(&target.pane_id) else {
+             return pane_not_found(id, &target.pane_id);
+         };
+@@ -2086,7 +2090,7 @@ fn normalize_state_labels(
+         .collect()
+ }
+ 
+-fn pane_not_found(id: String, pane_id: &str) -> String {
++pub(super) fn pane_not_found(id: String, pane_id: &str) -> String {
+     encode_error(id, "pane_not_found", format!("pane {pane_id} not found"))
+ }
+ 
+diff --git a/src/app/api/sub_agents.rs b/src/app/api/sub_agents.rs
+new file mode 100644
+index 00000000..d97bde7e
+--- /dev/null
++++ b/src/app/api/sub_agents.rs
+@@ -0,0 +1,230 @@
++use crate::api::schema::{
++    PaneReleaseSubAgentParams, PaneReportSubAgentParams, PaneTarget, ResponseResult,
++};
++use crate::app::App;
++
++use super::super::api_helpers::{
++    detect_state_from_api, normalize_metadata_source, normalize_reported_agent_label,
++};
++use super::responses::{encode_error, encode_success};
++
++/// Sub-agent slots are short identifiers chosen by the reporter.
++const SUB_AGENT_SLOT_MAX_CHARS: usize = 64;
++const SUB_AGENTS_PER_PANE_MAX: usize = 32;
++
++fn valid_slot(slot: &str) -> bool {
++    !slot.is_empty()
++        && slot.chars().count() <= SUB_AGENT_SLOT_MAX_CHARS
++        && !slot.contains(crate::terminal::SUB_AGENT_TARGET_SEPARATOR_CHAR)
++        && !slot.chars().any(char::is_control)
++}
++
++fn presentation_text(value: Option<String>) -> Option<String> {
++    value
++        .map(|value| value.trim().to_string())
++        .filter(|value| !value.is_empty())
++}
++
++impl App {
++    pub(super) fn handle_pane_report_sub_agent(
++        &mut self,
++        id: String,
++        params: PaneReportSubAgentParams,
++    ) -> String {
++        let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
++            return super::panes::pane_not_found(id, &params.pane_id);
++        };
++        if !valid_slot(&params.slot) {
++            return encode_error(id, "invalid_slot", "invalid sub-agent slot");
++        }
++        let Some(agent_label) = normalize_reported_agent_label(&params.agent) else {
++            return encode_error(id, "invalid_agent", "invalid agent label");
++        };
++        let source = match normalize_metadata_source(params.source) {
++            Ok(source) => source,
++            Err(message) => return encode_error(id, "invalid_source", message),
++        };
++        if params
++            .focus_argv
++            .as_ref()
++            .is_some_and(|argv| argv.is_empty() || argv.len() > 64)
++        {
++            return encode_error(
++                id,
++                "invalid_focus_argv",
++                "focus_argv must have 1-64 arguments",
++            );
++        }
++        if let Some(Err(message)) = params
++            .pane_resume_argv
++            .as_deref()
++            .map(crate::agent_resume::validate_resume_argv)
++        {
++            return encode_error(id, "invalid_pane_resume_argv", message);
++        }
++        let Some(terminal_id) = self
++            .state
++            .workspaces
++            .get(ws_idx)
++            .and_then(|workspace| workspace.pane_state(pane_id))
++            .map(|pane| pane.attached_terminal_id.clone())
++        else {
++            return super::panes::pane_not_found(id, &params.pane_id);
++        };
++        let pane_resume = params.pane_resume_argv.map(|argv| crate::agent_resume::ReportedAgentResume {
++            source: source.clone(),
++            agent: agent_label.clone(),
++            argv,
++        });
++        let next_seq = &mut self.state.next_agent_state_change_seq;
++        let Some(terminal) = self.state.terminals.get_mut(&terminal_id) else {
++            return super::panes::pane_not_found(id, &params.pane_id);
++        };
++        if !terminal.sub_agents().contains_key(&params.slot)
++            && terminal.sub_agents().len() >= SUB_AGENTS_PER_PANE_MAX
++        {
++            return encode_error(id, "sub_agent_limit", "too many sub-agents in this pane");
++        }
++        let focused = params.focused;
++        let mut changed = terminal.report_sub_agent(
++            &params.slot,
++            crate::terminal::SubAgentReport {
++                source,
++                agent_label,
++                state: detect_state_from_api(params.state),
++                title: presentation_text(params.title),
++                display_agent: presentation_text(params.display_agent),
++                focus_argv: params.focus_argv,
++                seq: params.seq,
++            },
++            || {
++                *next_seq += 1;
++                *next_seq
++            },
++        );
++        let mut resume_changed = false;
++        if let Some(resume) = pane_resume {
++            if terminal.reported_resume() != Some(&resume) {
++                terminal.restore_reported_resume(resume);
++                resume_changed = true;
++            }
++        }
++        if focused && terminal.focused_sub_agent() != Some(params.slot.as_str()) {
++            changed |= terminal.focus_sub_agent(&params.slot).is_some();
++        }
++        if resume_changed {
++            self.state.mark_session_dirty();
++            self.schedule_session_save();
++        }
++        if changed {
++            self.render_dirty.request_generic();
++            self.render_notify.notify_one();
++        }
++        encode_success(id, ResponseResult::Ok {})
++    }
++
++    pub(super) fn handle_pane_release_sub_agent(
++        &mut self,
++        id: String,
++        params: PaneReleaseSubAgentParams,
++    ) -> String {
++        let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
++            return super::panes::pane_not_found(id, &params.pane_id);
++        };
++        let Some(terminal_id) = self
++            .state
++            .workspaces
++            .get(ws_idx)
++            .and_then(|workspace| workspace.pane_state(pane_id))
++            .map(|pane| pane.attached_terminal_id.clone())
++        else {
++            return super::panes::pane_not_found(id, &params.pane_id);
++        };
++        let released = self
++            .state
++            .terminals
++            .get_mut(&terminal_id)
++            .is_some_and(|terminal| terminal.release_sub_agent(&params.slot, params.seq));
++        if released {
++            self.render_dirty.request_generic();
++            self.render_notify.notify_one();
++        }
++        encode_success(id, ResponseResult::Ok {})
++    }
++
++    /// Focuses `pane#slot`: focuses the pane, then runs the slot's focus command.
++    pub(super) fn handle_sub_agent_focus(
++        &mut self,
++        id: String,
++        pane_id: &str,
++        slot: &str,
++    ) -> String {
++        let response = self.handle_pane_focus(
++            id,
++            PaneTarget {
++                pane_id: pane_id.to_string(),
++            },
++        );
++        let Some((ws_idx, pane)) = self.parse_pane_id(pane_id) else {
++            return response;
++        };
++        let Some(terminal_id) = self
++            .state
++            .workspaces
++            .get(ws_idx)
++            .and_then(|workspace| workspace.pane_state(pane))
++            .map(|pane| pane.attached_terminal_id.clone())
++        else {
++            return response;
++        };
++        let focus_argv = self
++            .state
++            .terminals
++            .get_mut(&terminal_id)
++            .and_then(|terminal| terminal.focus_sub_agent(slot));
++        if let Some(argv) = focus_argv {
++            self.render_dirty.request_generic();
++            self.render_notify.notify_one();
++            if let Some(argv) = argv {
++                spawn_focus_command(argv);
++            }
++        }
++        response
++    }
++}
++
++fn spawn_focus_command(argv: Vec<String>) {
++    let Some((program, args)) = argv.split_first() else {
++        return;
++    };
++    let spawned = std::process::Command::new(program)
++        .args(args)
++        .stdin(std::process::Stdio::null())
++        .stdout(std::process::Stdio::null())
++        .stderr(std::process::Stdio::null())
++        .spawn();
++    match spawned {
++        // Reap the child off-thread so it does not linger as a zombie.
++        Ok(mut child) => {
++            std::thread::spawn(move || {
++                let _ = child.wait();
++            });
++        }
++        Err(error) => tracing::warn!(%error, program, "sub-agent focus command failed"),
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::valid_slot;
++
++    #[test]
++    fn slot_validation() {
++        assert!(valid_slot("3"));
++        assert!(valid_slot("zellij-pane-12"));
++        assert!(!valid_slot(""));
++        assert!(!valid_slot("a#b"));
++        assert!(!valid_slot("a\nb"));
++        assert!(!valid_slot(&"x".repeat(65)));
++    }
++}
+diff --git a/src/app/creation.rs b/src/app/creation.rs
+index 21e976ce..36b1ed50 100644
+--- a/src/app/creation.rs
++++ b/src/app/creation.rs
+@@ -213,8 +213,9 @@ impl App {
+                 self.state
+                     .terminals
+                     .get(&pane.attached_terminal_id)
+-                    .map(|terminal| (terminal.state, pane.seen))
++                    .map(|terminal| terminal.attention_states(pane.seen))
+             })
++            .flatten()
+             .max_by_key(|(state, seen)| tab_attention_priority(*state, *seen))
+             .unwrap_or((crate::detect::AgentState::Unknown, true));
+         Some(crate::api::schema::TabInfo {
+diff --git a/src/cli/pane.rs b/src/cli/pane.rs
+index 33583ee4..9f5a8fdc 100644
+--- a/src/cli/pane.rs
++++ b/src/cli/pane.rs
+@@ -2,11 +2,11 @@ use crate::api::schema::{
+     Method, OutputMatch, PaneCurrentParams, PaneDirection, PaneEdgesParams,
+     PaneFocusDirectionParams, PaneInputSetParams, PaneLayoutParams, PaneListParams,
+     PaneMoveDestination, PaneMoveParams, PaneNeighborParams, PaneProcessInfoParams, PaneReadParams,
+-    PaneReleaseAgentParams, PaneRenameParams, PaneReportAgentParams, PaneReportAgentSessionParams,
+-    PaneReportMetadataParams, PaneResizeParams, PaneRightClickTarget, PaneSendInputParams,
+-    PaneSendKeysParams, PaneSendTextParams, PaneSplitParams, PaneSwapParams, PaneTarget,
+-    PaneWaitForOutputParams, PaneZoomMode, PaneZoomParams, ReadFormat, ReadSource, Request,
+-    SplitDirection,
++    PaneReleaseAgentParams, PaneReleaseSubAgentParams, PaneRenameParams, PaneReportAgentParams,
++    PaneReportAgentSessionParams, PaneReportMetadataParams, PaneReportSubAgentParams,
++    PaneResizeParams, PaneRightClickTarget, PaneSendInputParams, PaneSendKeysParams,
++    PaneSendTextParams, PaneSplitParams, PaneSwapParams, PaneTarget, PaneWaitForOutputParams,
++    PaneZoomMode, PaneZoomParams, ReadFormat, ReadSource, Request, SplitDirection,
+ };
+ 
+ pub(super) fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
+@@ -39,6 +39,8 @@ pub(super) fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
+         "report-agent" => pane_report_agent(&args[1..]),
+         "report-agent-session" => pane_report_agent_session(&args[1..]),
+         "release-agent" => pane_release_agent(&args[1..]),
++        "report-sub-agent" => pane_report_sub_agent(&args[1..]),
++        "release-sub-agent" => pane_release_sub_agent(&args[1..]),
+         "report-metadata" => pane_report_metadata(&args[1..]),
+         "run" => pane_run(&args[1..]),
+         "help" | "--help" | "-h" => {
+@@ -1478,6 +1480,136 @@ fn pane_release_agent(args: &[String]) -> std::io::Result<i32> {
+     }))
+ }
+ 
++fn pane_report_sub_agent(args: &[String]) -> std::io::Result<i32> {
++    const USAGE: &str = "usage: herdr pane report-sub-agent <pane_id> --slot ID --source ID --agent LABEL --state idle|working|blocked|unknown [--title TEXT] [--display-agent TEXT] [--seq N] [--focused] [--pane-resume CMD] [-- <focus-command...>]";
++
++    let (args, focus_argv) = split_resume_argv(args);
++    let focused = args.iter().any(|arg| arg == "--focused");
++    let args: Vec<String> = args.iter().filter(|arg| *arg != "--focused").cloned().collect();
++    let args = super::expand_equals_args(
++        &args,
++        &[
++            "--slot",
++            "--source",
++            "--agent",
++            "--state",
++            "--title",
++            "--display-agent",
++            "--seq",
++            "--pane-resume",
++        ],
++    );
++    let mut pane_id = None;
++    let mut values: std::collections::HashMap<&str, String> = std::collections::HashMap::new();
++    let mut index = 0;
++    while index < args.len() {
++        let arg = args[index].as_str();
++        match arg {
++            "--slot" | "--source" | "--agent" | "--state" | "--title" | "--display-agent"
++            | "--seq" | "--pane-resume" => {
++                let Some(value) = args.get(index + 1) else {
++                    eprintln!("missing value for {arg}");
++                    return Ok(2);
++                };
++                values.insert(arg, value.clone());
++                index += 2;
++            }
++            option if option.starts_with('-') => {
++                eprintln!("unknown option: {option}");
++                return Ok(2);
++            }
++            positional => {
++                if pane_id.is_some() {
++                    eprintln!("unexpected argument: {positional}");
++                    return Ok(2);
++                }
++                pane_id = Some(super::normalize_pane_id(positional));
++                index += 1;
++            }
++        }
++    }
++    let Some(pane_id) = pane_id else {
++        eprintln!("{USAGE}");
++        return Ok(2);
++    };
++    for required in ["--slot", "--source", "--agent", "--state"] {
++        if values
++            .get(required)
++            .is_none_or(|value| value.trim().is_empty())
++        {
++            eprintln!("missing required {required}");
++            return Ok(2);
++        }
++    }
++    let state = super::parse_pane_agent_state(&values["--state"])?;
++    let seq = match values.get("--seq") {
++        Some(value) => Some(super::parse_u64_flag("--seq", value)?),
++        None => None,
++    };
++    super::send_ok_request(Method::PaneReportSubAgent(PaneReportSubAgentParams {
++        pane_id,
++        slot: values["--slot"].clone(),
++        source: values["--source"].trim().to_string(),
++        agent: values["--agent"].clone(),
++        state,
++        title: values.get("--title").cloned(),
++        display_agent: values.get("--display-agent").cloned(),
++        seq,
++        focus_argv,
++        focused,
++        pane_resume_argv: values
++            .get("--pane-resume")
++            .map(|cmd| cmd.split_whitespace().map(str::to_string).collect()),
++    }))
++}
++
++fn pane_release_sub_agent(args: &[String]) -> std::io::Result<i32> {
++    const USAGE: &str = "usage: herdr pane release-sub-agent <pane_id> --slot ID [--seq N]";
++    let args = super::expand_equals_args(args, &["--slot", "--seq"]);
++    let mut pane_id = None;
++    let mut slot = None;
++    let mut seq = None;
++    let mut index = 0;
++    while index < args.len() {
++        let arg = args[index].as_str();
++        match arg {
++            "--slot" | "--seq" => {
++                let Some(value) = args.get(index + 1) else {
++                    eprintln!("missing value for {arg}");
++                    return Ok(2);
++                };
++                if arg == "--slot" {
++                    slot = Some(value.clone());
++                } else {
++                    seq = Some(super::parse_u64_flag("--seq", value)?);
++                }
++                index += 2;
++            }
++            option if option.starts_with('-') => {
++                eprintln!("unknown option: {option}");
++                return Ok(2);
++            }
++            positional => {
++                if pane_id.is_some() {
++                    eprintln!("unexpected argument: {positional}");
++                    return Ok(2);
++                }
++                pane_id = Some(super::normalize_pane_id(positional));
++                index += 1;
++            }
++        }
++    }
++    let (Some(pane_id), Some(slot)) = (pane_id, slot) else {
++        eprintln!("{USAGE}");
++        return Ok(2);
++    };
++    super::send_ok_request(Method::PaneReleaseSubAgent(PaneReleaseSubAgentParams {
++        pane_id,
++        slot,
++        seq,
++    }))
++}
++
+ fn pane_report_metadata(args: &[String]) -> std::io::Result<i32> {
+     let Some(raw_pane_id) = args.first() else {
+         eprintln!("usage: herdr pane report-metadata <pane_id> --source ID [--agent LABEL] [--applies-to-source ID] [--title TEXT|--clear-title] [--display-agent TEXT|--clear-display-agent] [--state-label STATUS=TEXT] [--clear-state-labels] [--token NAME=VALUE] [--clear-token NAME] [--seq N] [--ttl-ms N]");
+@@ -1701,6 +1833,8 @@ fn print_pane_help() {
+     eprintln!("  herdr pane report-agent <pane_id> --source ID --agent LABEL --state idle|working|blocked|unknown [--message TEXT] [--seq N] [--agent-session-id ID] [--agent-session-path PATH]");
+     eprintln!("  herdr pane report-agent-session <pane_id> --source ID --agent LABEL [--seq N] [--agent-session-id ID] [--agent-session-path PATH]");
+     eprintln!("  herdr pane release-agent <pane_id> --source ID --agent LABEL [--seq N]");
++    eprintln!("  herdr pane report-sub-agent <pane_id> --slot ID --source ID --agent LABEL --state idle|working|blocked|unknown [--title TEXT] [--display-agent TEXT] [--seq N] [-- <focus-command...>]");
++    eprintln!("  herdr pane release-sub-agent <pane_id> --slot ID [--seq N]");
+     eprintln!("  herdr pane report-metadata <pane_id> --source ID [--agent LABEL] [--applies-to-source ID] [--title TEXT|--clear-title] [--display-agent TEXT|--clear-display-agent] [--state-label STATUS=TEXT] [--clear-state-labels] [--token NAME=VALUE] [--clear-token NAME] [--seq N] [--ttl-ms N]");
+     eprintln!("  herdr pane run <pane_id> <command>");
+ }
+diff --git a/src/cli/spec.rs b/src/cli/spec.rs
+index 9a503a18..d272dbaf 100644
+--- a/src/cli/spec.rs
++++ b/src/cli/spec.rs
+@@ -638,6 +638,8 @@ fn pane_command() -> Command {
+         .subcommand(report_agent_command())
+         .subcommand(report_agent_session_command())
+         .subcommand(release_agent_command())
++        .subcommand(report_sub_agent_command())
++        .subcommand(release_sub_agent_command())
+         .subcommand(report_metadata_command())
+ }
+ 
+@@ -685,6 +687,34 @@ fn release_agent_command() -> Command {
+         .arg(option("seq", "N"))
+ }
+ 
++fn report_sub_agent_command() -> Command {
++    Command::new("report-sub-agent")
++        .about("Report one of several agents inside a pane, such as a nested multiplexer pane")
++        .arg(required("pane_id", "PANE_ID"))
++        .arg(option("slot", "ID").required(true))
++        .arg(option("source", "ID").required(true))
++        .arg(option("agent", "LABEL").required(true))
++        .arg(pane_agent_state_option("state"))
++        .arg(option("title", "TEXT"))
++        .arg(option("display-agent", "TEXT"))
++        .arg(option("seq", "N"))
++        .arg(
++            Arg::new("focus_argv")
++                .value_name("FOCUS_ARG")
++                .num_args(0..)
++                .last(true)
++                .help("Command run when the sub-agent is focused, for example to switch the nested multiplexer"),
++        )
++}
++
++fn release_sub_agent_command() -> Command {
++    Command::new("release-sub-agent")
++        .about("Remove one of several agents reported inside a pane")
++        .arg(required("pane_id", "PANE_ID"))
++        .arg(option("slot", "ID").required(true))
++        .arg(option("seq", "N"))
++}
++
+ fn report_metadata_command() -> Command {
+     Command::new("report-metadata")
+         .about("Report display-only pane metadata")
+diff --git a/src/client/mod.rs b/src/client/mod.rs
+index f55db195..29fa1b18 100644
+--- a/src/client/mod.rs
++++ b/src/client/mod.rs
+@@ -2325,7 +2325,8 @@ async fn run_client_loop(
+                         outcome.repaint |= notification_repaint
+                             | shell.tick_copy_feedback(now)
+                             | shell.tick_workspace_highlight(now)
+-                            | shell.tick_endpoint_error(now);
++                            | shell.tick_endpoint_error(now)
++                            | shell::tick_status_spinner();
+                         let frame = outcome
+                             .repaint
+                             .then(|| shell.compose(state.reported_size.0, state.reported_size.1))
+diff --git a/src/client/shell.rs b/src/client/shell.rs
+index 2d180443..5d920687 100644
+--- a/src/client/shell.rs
++++ b/src/client/shell.rs
+@@ -175,12 +175,31 @@ fn pane_surface_topology_signature(surface: &PaneSurfaceFrame) -> u64 {
+     hash
+ }
+ 
++const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
++static SPINNER_FRAME: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
++static SPINNER_DRAWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
++
++/// Advances the working spinner; true when the last frame drew one and needs a repaint.
++pub(crate) fn tick_status_spinner() -> bool {
++    use std::sync::atomic::Ordering;
++    if !SPINNER_DRAWN.swap(false, Ordering::Relaxed) {
++        return false;
++    }
++    SPINNER_FRAME.fetch_add(1, Ordering::Relaxed);
++    true
++}
++
+ fn status_icon(
+     status: crate::api::schema::AgentStatus,
+     style: crate::config::StatusIndicatorStyle,
+ ) -> &'static str {
+     use crate::api::schema::AgentStatus;
+     use crate::config::StatusIndicatorStyle;
++    use std::sync::atomic::Ordering;
++    if status == AgentStatus::Working {
++        SPINNER_DRAWN.store(true, Ordering::Relaxed);
++        return SPINNER_FRAMES[SPINNER_FRAME.load(Ordering::Relaxed) % SPINNER_FRAMES.len()];
++    }
+     match (style, status) {
+         (
+             StatusIndicatorStyle::Dots,
+diff --git a/src/logging.rs b/src/logging.rs
+index 2d1cd5a1..ade850e8 100644
+--- a/src/logging.rs
++++ b/src/logging.rs
+@@ -113,6 +113,8 @@ fn is_routine_api_method(method: &str) -> bool {
+             | "pane.report_agent"
+             | "pane.report_agent_session"
+             | "pane.report_metadata"
++            | "pane.report_sub_agent"
++            | "pane.release_sub_agent"
+     )
+ }
+ 
+diff --git a/src/server/client_shell.rs b/src/server/client_shell.rs
+index 0a98da09..5eb8c260 100644
+--- a/src/server/client_shell.rs
++++ b/src/server/client_shell.rs
+@@ -152,8 +152,17 @@ pub(super) fn snapshot_with_completions(
+         .agents
+         .into_iter()
+         .map(|agent| {
+-            let pane_id = agent.pane_id;
+-            let focused = focused_pane_id.as_deref() == Some(pane_id.as_str());
++            // Sub-agents share a pane; give each its own `pane#slot` agent id.
++            let (pane_id, focused) = match agent.slot.as_deref() {
++                Some(slot) => (
++                    crate::terminal::sub_agent_target_id(&agent.pane_id, slot),
++                    agent.focused,
++                ),
++                None => {
++                    let focused = focused_pane_id.as_deref() == Some(agent.pane_id.as_str());
++                    (agent.pane_id, focused)
++                }
++            };
+             let mut state_labels = agent.state_labels.into_iter().collect::<Vec<_>>();
+             state_labels.sort_by(|left, right| left.0.cmp(&right.0));
+             let mut tokens = agent.tokens.into_iter().collect::<Vec<_>>();
+diff --git a/src/terminal/mod.rs b/src/terminal/mod.rs
+index 129634c6..0283ec7d 100644
+--- a/src/terminal/mod.rs
++++ b/src/terminal/mod.rs
+@@ -10,7 +10,8 @@ pub use id::TerminalId;
+ pub use runtime::TerminalRuntime;
+ pub(crate) use runtime_registry::TerminalRuntimeRegistry;
+ pub use state::{
+-    AgentMetadataReport, EffectivePresentation, EffectiveStateChange, TerminalState,
+-    TerminalStateMutation,
++    split_sub_agent_target_id, sub_agent_target_id, AgentMetadataReport, EffectivePresentation,
++    EffectiveStateChange, SubAgentReport, TerminalState, TerminalStateMutation,
++    SUB_AGENT_TARGET_SEPARATOR_CHAR,
+ };
+ pub(crate) use title::stripped_terminal_title;
+diff --git a/src/terminal/state.rs b/src/terminal/state.rs
+index 11d540b1..12b74ddd 100644
+--- a/src/terminal/state.rs
++++ b/src/terminal/state.rs
+@@ -14,6 +14,13 @@ use crate::terminal::TerminalId;
+ mod metadata;
+ pub use metadata::{AgentMetadata, AgentMetadataReport, EffectivePresentation};
+ 
++#[path = "sub_agents.rs"]
++mod sub_agents;
++pub use sub_agents::{
++    split_sub_agent_target_id, sub_agent_target_id, SubAgent, SubAgentReport,
++    SUB_AGENT_TARGET_SEPARATOR_CHAR,
++};
++
+ #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+ pub struct HookAuthority {
+     pub source: String,
+@@ -162,6 +169,8 @@ pub struct TerminalState {
+     agent_process_acquisition_pending: bool,
+     pub pending_agent_resume_plan: Option<crate::agent_resume::AgentResumePlan>,
+     pub restore_error: Option<String>,
++    sub_agents: std::collections::BTreeMap<String, SubAgent>,
++    focused_sub_agent: Option<String>,
+ }
+ 
+ impl TerminalState {
+@@ -202,6 +211,8 @@ impl TerminalState {
+             agent_process_acquisition_pending: false,
+             pending_agent_resume_plan: None,
+             restore_error: None,
++            sub_agents: std::collections::BTreeMap::new(),
++            focused_sub_agent: None,
+         }
+     }
+ 
+diff --git a/src/terminal/sub_agents.rs b/src/terminal/sub_agents.rs
+new file mode 100644
+index 00000000..e9229052
+--- /dev/null
++++ b/src/terminal/sub_agents.rs
+@@ -0,0 +1,219 @@
++use std::collections::BTreeMap;
++
++use crate::detect::AgentState;
++
++use super::TerminalState;
++
++/// One of several agents reported inside a single terminal, for example agents
++/// running in the panes of a terminal multiplexer nested in a Herdr pane.
++///
++/// Sub-agents are reported state only: they never take part in screen
++/// detection, hook authority, or session restore of the terminal itself.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct SubAgent {
++    pub source: String,
++    pub agent_label: String,
++    pub state: AgentState,
++    pub title: Option<String>,
++    pub display_agent: Option<String>,
++    pub focus_argv: Option<Vec<String>>,
++    pub seq: Option<u64>,
++    pub state_change_seq: u64,
++    /// False after the agent finished a turn until its slot is focused.
++    pub seen: bool,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct SubAgentReport {
++    pub source: String,
++    pub agent_label: String,
++    pub state: AgentState,
++    pub title: Option<String>,
++    pub display_agent: Option<String>,
++    pub focus_argv: Option<Vec<String>>,
++    pub seq: Option<u64>,
++}
++
++/// Separator between a pane id and a sub-agent slot in agent target ids.
++pub const SUB_AGENT_TARGET_SEPARATOR_CHAR: char = '#';
++
++pub fn sub_agent_target_id(pane_id: &str, slot: &str) -> String {
++    format!("{pane_id}{SUB_AGENT_TARGET_SEPARATOR_CHAR}{slot}")
++}
++
++/// Splits `w1:p2#slot` into (`w1:p2`, `slot`).
++pub fn split_sub_agent_target_id(target: &str) -> Option<(&str, &str)> {
++    let (pane_id, slot) = target.split_once(SUB_AGENT_TARGET_SEPARATOR_CHAR)?;
++    (!pane_id.is_empty() && !slot.is_empty()).then_some((pane_id, slot))
++}
++
++impl TerminalState {
++    pub fn sub_agents(&self) -> &BTreeMap<String, SubAgent> {
++        &self.sub_agents
++    }
++
++    /// Applies a sub-agent report. Returns true when anything changed.
++    /// `next_state_change_seq` is called only when the reported state changes.
++    pub fn report_sub_agent(
++        &mut self,
++        slot: &str,
++        report: SubAgentReport,
++        next_state_change_seq: impl FnOnce() -> u64,
++    ) -> bool {
++        if let Some(existing) = self.sub_agents.get(slot) {
++            if let (Some(previous), Some(incoming)) = (existing.seq, report.seq) {
++                if incoming <= previous {
++                    return false;
++                }
++            }
++        }
++        let previous = self.sub_agents.get(slot);
++        let state_changed = previous.is_none_or(|previous| previous.state != report.state);
++        let finished_turn = previous.is_some_and(|previous| {
++            previous.state == AgentState::Working && report.state == AgentState::Idle
++        });
++        let state_change_seq = if state_changed {
++            next_state_change_seq()
++        } else {
++            previous.map_or(0, |previous| previous.state_change_seq)
++        };
++        let seen = if finished_turn {
++            false
++        } else {
++            previous.is_none_or(|previous| previous.seen)
++        };
++        let updated = SubAgent {
++            source: report.source,
++            agent_label: report.agent_label,
++            state: report.state,
++            title: report
++                .title
++                .or_else(|| previous.and_then(|p| p.title.clone())),
++            display_agent: report
++                .display_agent
++                .or_else(|| previous.and_then(|p| p.display_agent.clone())),
++            focus_argv: report
++                .focus_argv
++                .or_else(|| previous.and_then(|p| p.focus_argv.clone())),
++            seq: report.seq,
++            state_change_seq,
++            seen,
++        };
++        if previous == Some(&updated) {
++            return false;
++        }
++        self.sub_agents.insert(slot.to_string(), updated);
++        true
++    }
++
++    pub fn release_sub_agent(&mut self, slot: &str, seq: Option<u64>) -> bool {
++        let Some(existing) = self.sub_agents.get(slot) else {
++            return false;
++        };
++        if let (Some(previous), Some(incoming)) = (existing.seq, seq) {
++            if incoming <= previous {
++                return false;
++            }
++        }
++        self.sub_agents.remove(slot).is_some()
++    }
++
++    /// Marks a slot focused; returns its focus command, if any.
++    pub fn focus_sub_agent(&mut self, slot: &str) -> Option<Option<Vec<String>>> {
++        let agent = self.sub_agents.get_mut(slot)?;
++        agent.seen = true;
++        self.focused_sub_agent = Some(slot.to_string());
++        Some(agent.focus_argv.clone())
++    }
++
++    /// The terminal's own state plus each sub-agent's, for attention rollups.
++    pub fn attention_states(
++        &self,
++        pane_seen: bool,
++    ) -> impl Iterator<Item = (AgentState, bool)> + '_ {
++        std::iter::once((self.state, pane_seen)).chain(
++            self.sub_agents
++                .values()
++                .map(|agent| (agent.state, agent.seen)),
++        )
++    }
++
++    pub fn focused_sub_agent(&self) -> Option<&str> {
++        self.focused_sub_agent
++            .as_deref()
++            .filter(|slot| self.sub_agents.contains_key(*slot))
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn terminal() -> TerminalState {
++        TerminalState::new(crate::terminal::TerminalId::alloc(), "/tmp".into())
++    }
++
++    fn report(state: AgentState, seq: u64) -> SubAgentReport {
++        SubAgentReport {
++            source: "test".into(),
++            agent_label: "claude".into(),
++            state,
++            title: None,
++            display_agent: None,
++            focus_argv: None,
++            seq: Some(seq),
++        }
++    }
++
++    #[test]
++    fn target_ids_round_trip() {
++        let target = sub_agent_target_id("w1:p2", "3");
++        assert_eq!(target, "w1:p2#3");
++        assert_eq!(split_sub_agent_target_id(&target), Some(("w1:p2", "3")));
++        assert_eq!(split_sub_agent_target_id("w1:p2"), None);
++        assert_eq!(split_sub_agent_target_id("w1:p2#"), None);
++    }
++
++    #[test]
++    fn stale_reports_are_ignored() {
++        let mut terminal = terminal();
++        assert!(terminal.report_sub_agent("a", report(AgentState::Working, 5), || 1));
++        assert!(!terminal.report_sub_agent("a", report(AgentState::Idle, 4), || 2));
++        assert_eq!(terminal.sub_agents()["a"].state, AgentState::Working);
++        assert!(!terminal.release_sub_agent("a", Some(5)));
++        assert!(terminal.release_sub_agent("a", Some(6)));
++        assert!(terminal.sub_agents().is_empty());
++    }
++
++    #[test]
++    fn slots_are_independent_and_keep_presentation() {
++        let mut terminal = terminal();
++        let mut named = report(AgentState::Idle, 1);
++        named.display_agent = Some("fortigate".into());
++        named.focus_argv = Some(vec!["true".into()]);
++        terminal.report_sub_agent("a", named, || 1);
++        terminal.report_sub_agent("b", report(AgentState::Blocked, 1), || 2);
++        terminal.report_sub_agent("a", report(AgentState::Working, 2), || 3);
++        let a = &terminal.sub_agents()["a"];
++        assert_eq!(a.display_agent.as_deref(), Some("fortigate"));
++        assert_eq!(a.state_change_seq, 3);
++        assert_eq!(terminal.sub_agents()["b"].state, AgentState::Blocked);
++        assert_eq!(
++            terminal.focus_sub_agent("a"),
++            Some(Some(vec!["true".to_string()]))
++        );
++        assert_eq!(terminal.focused_sub_agent(), Some("a"));
++        assert_eq!(terminal.focus_sub_agent("missing"), None);
++    }
++
++    #[test]
++    fn finished_turn_is_unseen_until_focused() {
++        let mut terminal = terminal();
++        terminal.report_sub_agent("a", report(AgentState::Working, 1), || 1);
++        assert!(terminal.sub_agents()["a"].seen);
++        terminal.report_sub_agent("a", report(AgentState::Idle, 2), || 2);
++        assert!(!terminal.sub_agents()["a"].seen);
++        terminal.focus_sub_agent("a");
++        assert!(terminal.sub_agents()["a"].seen);
++    }
++}
+diff --git a/src/workspace/aggregate.rs b/src/workspace/aggregate.rs
+index 3fd45fca..43732a1c 100644
+--- a/src/workspace/aggregate.rs
++++ b/src/workspace/aggregate.rs
+@@ -68,8 +68,9 @@ impl Workspace {
+             .filter_map(|pane| {
+                 terminals
+                     .get(&pane.attached_terminal_id)
+-                    .map(|terminal| (terminal.state, pane.seen))
++                    .map(|terminal| terminal.attention_states(pane.seen))
+             })
++            .flatten()
+             .max_by_key(|(state, seen)| pane_attention_priority(*state, *seen))
+             .unwrap_or((AgentState::Unknown, true))
+     }
+-- 
+2.54.0
+
