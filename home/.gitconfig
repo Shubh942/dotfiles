@@ -1,0 +1,9 @@
+[user]
+	email = shubhmehta942@gmail.com
+	name = shubh.m@even.in
+[core]
+	editor = nano
+[safe]
+	directory = /opt/flutter
+[gitreview]
+	topic = %(branch)s

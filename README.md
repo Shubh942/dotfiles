@@ -1,7 +1,12 @@
 # dotfiles
 
-Terminal setup: alacritty, zellij, a patched herdr, and the Claude hooks that
-connect Claude running in zellij to herdr.
+Terminal and desktop setup: alacritty, kitty, ghostty, wezterm, zellij, fish,
+nushell, starship, nvim, niri, git, bash/zsh, btop, lazygit, micro, the Fedora
+setup scripts, a patched herdr, and the Claude hooks that connect Claude
+running in zellij to herdr.
+
+Secrets stay out of this repo: fish loads them from `~/.ssh/api_keys.fish`.
+`fish_variables` is per-machine and not tracked.
 
 ## New machine
 
