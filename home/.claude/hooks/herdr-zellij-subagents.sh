@@ -12,6 +12,8 @@
 [ -n "${HERDR_BIN_PATH:-}" ] && [ -n "${ZELLIJ_SESSION_NAME:-}" ] && [ -n "${ZELLIJ_PANE_ID:-}" ] || exit 0
 
 H="$HERDR_BIN_PATH"
+# Installing a new herdr renames the old binary, and processes started before keep its path.
+[ -x "${H%/*}/herdr" ] && H="${H%/*}/herdr"
 state_dir="${XDG_RUNTIME_DIR:-/tmp}/herdr-zj/$ZELLIJ_SESSION_NAME"
 mkdir -p "$state_dir" 2>/dev/null || exit 0
 slot="$ZELLIJ_PANE_ID"
