@@ -30,6 +30,9 @@ kdl() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
   for f in "$saved.prev"/*.json; do
     id="$(jq -r '.session_id // empty' "$f")"
     cwd="$(jq -r '.cwd // empty' "$f")"
+    # Older saves have no cwd: take the one the conversation started in.
+    [ -n "$cwd" ] || cwd="$(cat "$HOME"/.claude/projects/*/"$id.jsonl" 2>/dev/null \
+      | grep -o -m1 '"cwd":"[^"]*"' | cut -d'"' -f4)"
     [ -n "$id" ] && [ -d "$cwd" ] || continue
     title="$(jq -r '.title // empty' "$f")"
     # Original flags, minus any old resume/continue, plus this conversation.
