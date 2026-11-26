@@ -1,8 +1,8 @@
 From f26a35214eb431fb6206e200dfd14649999b19a9 Mon Sep 17 00:00:00 2001
 From: Shubh Mehta <shubhmehta942@gmail.com>
 Date: Thu, 19 Nov 2026 13:46:58 +0530
-Subject: [PATCH] zellij slots: sub-agents, working spinner, zellij focus sync,
- restore after reboot
+Subject: [PATCH 1/2] zellij slots: sub-agents, working spinner, zellij focus
+ sync, restore after reboot
 
 ---
  docs/next/api/herdr-api.schema.json | 134 ++++++++++++++++
@@ -1292,5 +1292,37 @@ index 3fd45fca..43732a1c 100644
              .unwrap_or((AgentState::Unknown, true))
      }
 -- 
-2.54.0
+2.56.1
+
+
+From a29d6d63049187f2496b10a76b696e73e091f7e2 Mon Sep 17 00:00:00 2001
+From: "shubh.m@even.in" <shubhmehta942@gmail.com>
+Date: Thu, 26 Nov 2026 15:14:08 +0530
+Subject: [PATCH 2/2] agent resume: set HERDR_RESUMING=1 in the shell the
+ resume command is typed into
+
+So a shell rc that auto-starts something (zellij) can skip it there.
+---
+ src/app/agent_resume.rs | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/src/app/agent_resume.rs b/src/app/agent_resume.rs
+index f088138c..21b6a3fe 100644
+--- a/src/app/agent_resume.rs
++++ b/src/app/agent_resume.rs
+@@ -249,7 +249,11 @@ impl App {
+         };
+         let Some(launch_env) = self
+             .find_pane(pane_id)
+-            .and_then(|(ws_idx, _)| self.pane_launch_env(ws_idx, pane_id, Vec::new()))
++            .and_then(|(ws_idx, _)| {
++                // Lets the shell's rc skip auto-starting anything that would take the typed command.
++                let env = vec![("HERDR_RESUMING".to_string(), "1".to_string())];
++                self.pane_launch_env(ws_idx, pane_id, env)
++            })
+         else {
+             return false;
+         };
+-- 
+2.56.1
 

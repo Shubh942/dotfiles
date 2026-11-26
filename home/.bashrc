@@ -140,3 +140,8 @@ neww() {
 export PATH="$HOME/bin:$PATH"
 export PATH="$HOME/.local/bin:$PATH"
 export PATH="$PATH:$(go env GOPATH)/bin"
+
+# Every herdr tab runs zellij; herdr marks shells it types a restore command into with HERDR_RESUMING.
+if [ "${HERDR_ENV:-}" = 1 ] && [ -z "${ZELLIJ:-}" ] && [ -z "${HERDR_RESUMING:-}" ] && command -v zellij >/dev/null; then
+  zellij
+fi
