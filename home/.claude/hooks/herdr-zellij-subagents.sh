@@ -56,7 +56,12 @@ session_title() {
 # herdr pane of the zellij client attached to this session: follow the zellij server's unix
 # sockets to client pids and read HERDR_PANE_ID from their environment.
 herdr_pane() {
-  srv="$(pgrep -f "zellij --server .*/${ZELLIJ_SESSION_NAME}\$" | head -n1)"
+  # The zellij server is an ancestor of this Claude (zellij 0.46+ names its socket by a hash).
+  srv="$cpid"
+  while [ "$srv" -gt 1 ] && ! tr '\0' ' ' < "/proc/$srv/cmdline" 2>/dev/null | grep -q '^[^ ]*zellij --server '; do
+    srv="$(awk '{print $4}' /proc/$srv/stat 2>/dev/null || echo 1)"
+  done
+  [ "$srv" -gt 1 ] || srv=""
   [ -n "$srv" ] || return 1
   for zc in $(ss -xpn 2>/dev/null | awk -v srv="pid=$srv," '
       { users[$6]=$9; peer[$6]=$8 }
