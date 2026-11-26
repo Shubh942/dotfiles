@@ -1,7 +1,7 @@
 From f26a35214eb431fb6206e200dfd14649999b19a9 Mon Sep 17 00:00:00 2001
 From: Shubh Mehta <shubhmehta942@gmail.com>
 Date: Thu, 19 Nov 2026 13:46:58 +0530
-Subject: [PATCH 1/2] zellij slots: sub-agents, working spinner, zellij focus
+Subject: [PATCH 1/3] zellij slots: sub-agents, working spinner, zellij focus
  sync, restore after reboot
 
 ---
@@ -1298,7 +1298,7 @@ index 3fd45fca..43732a1c 100644
 From a29d6d63049187f2496b10a76b696e73e091f7e2 Mon Sep 17 00:00:00 2001
 From: "shubh.m@even.in" <shubhmehta942@gmail.com>
 Date: Thu, 26 Nov 2026 15:14:08 +0530
-Subject: [PATCH 2/2] agent resume: set HERDR_RESUMING=1 in the shell the
+Subject: [PATCH 2/3] agent resume: set HERDR_RESUMING=1 in the shell the
  resume command is typed into
 
 So a shell rc that auto-starts something (zellij) can skip it there.
@@ -1323,6 +1323,101 @@ index f088138c..21b6a3fe 100644
          else {
              return false;
          };
+-- 
+2.56.1
+
+
+From 9cad31de9fa0784a78a49cb9e77e7ea7c61af32a Mon Sep 17 00:00:00 2001
+From: "shubh.m@even.in" <shubhmehta942@gmail.com>
+Date: Thu, 26 Nov 2026 15:48:20 +0530
+Subject: [PATCH 3/3] Next/previous agent: step from the focused sub-agent
+
+Sub-agents are listed as pane#slot, so matching the focused pane id never
+found the current one and the keys always jumped to the first or last agent.
+---
+ src/client/shell/actions.rs                   | 13 +++--
+ .../tests/agents_worktrees_notifications.rs   | 47 +++++++++++++++++++
+ 2 files changed, 57 insertions(+), 3 deletions(-)
+
+diff --git a/src/client/shell/actions.rs b/src/client/shell/actions.rs
+index 83819b0d..19978180 100644
+--- a/src/client/shell/actions.rs
++++ b/src/client/shell/actions.rs
+@@ -907,9 +907,16 @@ impl ClientShellState {
+                 if agents.is_empty() {
+                     return None;
+                 }
+-                let current = agents.iter().position(|pane_id| {
+-                    Some(pane_id.as_str()) == snapshot.focused_pane_id.as_deref()
+-                });
++                // Sub-agents share their pane's id with a `#slot` suffix, so match the focused agent.
++                let focused_agent = snapshot
++                    .agents
++                    .iter()
++                    .find(|agent| agent.focused)
++                    .map(|agent| agent.pane_id.as_str())
++                    .or(snapshot.focused_pane_id.as_deref());
++                let current = agents
++                    .iter()
++                    .position(|pane_id| Some(pane_id.as_str()) == focused_agent);
+                 let next = match (current, action) {
+                     (Some(current), KeybindAction::PreviousAgent) => {
+                         (current + agents.len() - 1) % agents.len()
+diff --git a/src/client/shell/tests/agents_worktrees_notifications.rs b/src/client/shell/tests/agents_worktrees_notifications.rs
+index df09f464..18d369d3 100644
+--- a/src/client/shell/tests/agents_worktrees_notifications.rs
++++ b/src/client/shell/tests/agents_worktrees_notifications.rs
+@@ -1682,3 +1682,50 @@ fn semantic_notifications_use_client_policy_and_stable_navigation_targets() {
+     assert!(state.visible_notification.is_none());
+     assert_eq!(state.pending_notifications.len(), 1);
+ }
++
++#[test]
++fn next_and_previous_agent_step_through_sub_agents_of_the_focused_pane() {
++    let mut projected = snapshot();
++    projected.focused_pane_id = Some("pane_1".into());
++    for (slot, focused) in [("a", false), ("b", true), ("c", false)] {
++        projected.agents.push(ClientShellAgent {
++            pane_id: format!("pane_1#{slot}"),
++            workspace_id: "ws_1".into(),
++            tab_id: "tab_1".into(),
++            name: Some(slot.into()),
++            display_agent: None,
++            agent: Some("claude".into()),
++            title: None,
++            terminal_title: None,
++            terminal_title_stripped: None,
++            agent_status: AgentStatus::Idle,
++            state_change_seq: 1,
++            state_labels: Vec::new(),
++            tokens: Vec::new(),
++            focused,
++        });
++    }
++    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
++    state.set_snapshot(Box::new(projected));
++    state.set_pane_surface(surface());
++    state.compose(106, 30).expect("agent sidebar");
++
++    for (action, expected) in [
++        (crate::input::KeybindAction::NextAgent, "pane_1#c"),
++        (crate::input::KeybindAction::PreviousAgent, "pane_1#a"),
++    ] {
++        let mut input = ClientShellInput::default();
++        state.record_binding(crate::input::KeybindMatch::Action(action), &mut input);
++        assert!(
++            matches!(
++                &input.actions[..],
++                [ClientShellAction::Endpoint { request, .. }]
++                    if matches!(
++                        &request.method,
++                        crate::api::schema::Method::PaneFocus(target) if target.pane_id == expected
++                    )
++            ),
++            "{expected}"
++        );
++    }
++}
 -- 
 2.56.1
 
